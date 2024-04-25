@@ -28,7 +28,9 @@ def get_desktop_path():
 
 def download_3d_model():
     code = code_entry.get()
-    path = path_label["text"]
+    download_path = load_path_config() or get_desktop_path()
+    filename = f"{code}.step"
+    filepath = os.path.join(download_path, filename)
 
     has_url = 'https://pro.lceda.cn/api/eda/product/search'
     has_formdata = {
@@ -50,7 +52,7 @@ def download_3d_model():
         url = 'https://pro.lceda.cn/api/devices/searchByIds'
         formdata = {
             'uuids[]': hasDevice,
-            'path': path
+            'path': filepath  # 保存文件路径改为用户选择的下载路径
         }
 
         r1 = requests.post(url, data=formdata)
@@ -64,7 +66,7 @@ def download_3d_model():
         formdata2 = {
             'uuids[]': Model_id,
             'dataStr': 'yes',
-            'path': path
+            'path': filepath  # 保存文件路径改为用户选择的下载路径
         }
 
         r2 = requests.post(url2, data=formdata2)
@@ -79,9 +81,6 @@ def download_3d_model():
         r3 = requests.get(download_url)
         demo = r3.text
 
-        filename = f"{code}.step"  # 设置文件名为产品代码
-        desktop_path = get_desktop_path()
-        filepath = os.path.join(desktop_path, filename)
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(demo)
 
@@ -93,6 +92,7 @@ def download_3d_model():
         now = datetime.now().strftime("%H:%M:%S")
         log_area.insert(tk.END, f"[{now}] 错误：请检查编号是否正确。\n")
         log_area.see(tk.END)  # 将滚动条滚动到底部
+
 
 def set_path():
     selected_path = filedialog.askdirectory()
@@ -109,7 +109,7 @@ def about():
     text.pack(expand=True, fill="both")
     text.tag_configure("link", foreground="blue", underline=True)
 
-    about_text = "嘉立创3D模型下载器\n版本：1.0\n作者：Jupiter\n\n\n\n"
+    about_text = "嘉立创3D模型下载器\n版本：1.1\n作者：Jupiter\n\n\n\n"
     about_text += "更多信息请访问：https://github.com/zhutongxueya/JLC3DDownload"
 
     about_text +="\n\n\n\n代码来自于kulya97，感谢大佬 "
@@ -147,6 +147,15 @@ code_label.grid(row=0, column=0, padx=(10, 5), pady=(20, 10), sticky="w")
 code_entry = tk.Entry(root, font=("Arial", 12))
 code_entry.insert(tk.END, "C8734")
 code_entry.grid(row=0, column=1, padx=(0, 10), pady=(20, 10), sticky="ew")
+
+# 绑定事件处理函数，实现点击输入框自动粘贴文件路径
+def paste_filepath(event):
+    filepath = root.clipboard_get()
+    code_entry.delete(0, tk.END)  # 清空输入框
+    code_entry.insert(tk.END, filepath)  # 粘贴文件路径
+
+code_entry.bind("<Button-1>", paste_filepath)  # 绑定左键点击事件
+
 
 # 创建下载按钮
 download_button = tk.Button(root, text="下载3D模型", command=download_3d_model, bg="#4CAF50", fg="white", width=20, height=2)
