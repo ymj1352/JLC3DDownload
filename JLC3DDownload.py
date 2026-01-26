@@ -1,189 +1,237 @@
 import tkinter as tk
-from tkinter import scrolledtext, filedialog, messagebox
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 import requests
 import json
 import os
-import webbrowser
+import threading
+import configparser
 from datetime import datetime
-import configparser  # 引入configparser模块
+import webbrowser
+import subprocess
+import sys
 
-# 保存路径信息到配置文件
-def save_path_config(path):
-    config = configparser.ConfigParser()
-    config['PATH'] = {'DownloadPath': path}
-    with open('config.ini', 'w') as configfile:
-        config.write(configfile)
+# =====================================================
+# 配置与逻辑 (保持不变)
+# =====================================================
+APP_DIR = os.path.join(os.path.expanduser("~"), ".jlc3d")
+CONFIG_FILE = os.path.join(APP_DIR, "config.ini")
 
-# 从配置文件中读取路径信息
-def load_path_config():
-    config = configparser.ConfigParser()
-    config.read('config.ini')
-    if 'PATH' in config and 'DownloadPath' in config['PATH']:
-        return config['PATH']['DownloadPath']
-    else:
-        return None
+def ensure_app_dir():
+    if not os.path.exists(APP_DIR): os.makedirs(APP_DIR)
 
-def get_desktop_path():
+def save_download_path(path):
+    ensure_app_dir()
+    cfg = configparser.ConfigParser()
+    cfg["PATH"] = {"DownloadPath": path}
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f: cfg.write(f)
+
+def load_download_path():
+    if not os.path.exists(CONFIG_FILE): return None
+    cfg = configparser.ConfigParser()
+    cfg.read(CONFIG_FILE, encoding="utf-8")
+    return cfg.get("PATH", "DownloadPath", fallback=None)
+
+def default_desktop():
     return os.path.join(os.path.expanduser("~"), "Desktop")
 
-def download_3d_model():
-    code = code_entry.get()
-    download_path = load_path_config() or get_desktop_path()
-    filename = f"{code}.step"
-    filepath = os.path.join(download_path, filename)
+# API 逻辑
+BASE_API = "https://pro.lceda.cn/api"
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-    has_url = 'https://pro.lceda.cn/api/eda/product/search'
-    has_formdata = {
-        'keyword': code,
-        'needAggs': 'true',
-        'url': '/api/eda/product/list',
-        'currPage': '1',
-        'pageSize': '10'
-    }
+def search_product(code):
+    r = requests.post(f"{BASE_API}/eda/product/search", data={"keyword": code, "needAggs": "true", "currPage": "1", "pageSize": "10"}, headers=HEADERS, timeout=10)
+    r.raise_for_status()
+    products = r.json()["result"]["productList"]
+    if not products: raise ValueError("未找到该器件")
+    return products[0]["hasDevice"]
 
-    try:
-        r0 = requests.post(has_url, data=has_formdata)
-        json_data = r0.json()
-        Data_ls = json_data['result']
-        Data_ls2 = Data_ls['productList']
-        Datas = Data_ls2[0]
-        hasDevice = Datas['hasDevice']
+def get_model_uuid(device_uuid):
+    r = requests.post(f"{BASE_API}/devices/searchByIds", data={"uuids[]": device_uuid}, headers=HEADERS, timeout=10)
+    r.raise_for_status()
+    attrs = r.json()["result"][0]["attributes"]
+    if "3D Model" not in attrs: raise ValueError("该器件没有 3D 模型")
+    return attrs["3D Model"]
 
-        url = 'https://pro.lceda.cn/api/devices/searchByIds'
-        formdata = {
-            'uuids[]': hasDevice,
-            'path': filepath  # 保存文件路径改为用户选择的下载路径
-        }
+def get_model_file(model_uuid):
+    r = requests.post(f"{BASE_API}/components/searchByIds?forceOnline=1", data={"uuids[]": model_uuid, "dataStr": "yes"}, headers=HEADERS, timeout=10)
+    r.raise_for_status()
+    data = json.loads(r.json()["result"][0]["dataStr"])
+    return data["model"]
 
-        r1 = requests.post(url, data=formdata)
-        json1_data = r1.json()
-        Data1_ls = json1_data['result']
-        Data1_ls2 = Data1_ls[0]
-        Data1_ls3 = Data1_ls2['attributes']
-        Model_id = Data1_ls3['3D Model']
+def download_step_file(model_file):
+    url = f"https://modules.lceda.cn/qAxj6KHrDKw4blvCG8QJPs7Y/{model_file}"
+    r = requests.get(url, headers=HEADERS, timeout=15)
+    r.raise_for_status()
+    return r.content
 
-        url2 = 'https://pro.lceda.cn/api/components/searchByIds?forceOnline=1'
-        formdata2 = {
-            'uuids[]': Model_id,
-            'dataStr': 'yes',
-            'path': filepath  # 保存文件路径改为用户选择的下载路径
-        }
+# =====================================================
+# 调整后的 UI
+# =====================================================
 
-        r2 = requests.post(url2, data=formdata2)
-        json2_data = r2.json()
-        Data2_ls = json2_data['result']
-        Data2_ls2 = Data2_ls[0]
-        Data2_ls3 = Data2_ls2['dataStr']
-        Data2_ls4 = json.loads(Data2_ls3)
-        Model_id0 = Data2_ls4['model']
+class JLC3DApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("嘉立创 3D 模型下载器")
+        self.geometry("540x440")
+        self.configure(bg="#f8f9fa")
 
-        download_url = "https://modules.lceda.cn/qAxj6KHrDKw4blvCG8QJPs7Y/" + Model_id0
-        r3 = requests.get(download_url)
-        demo = r3.text
+        self.download_path = load_download_path() or default_desktop()
+        self.last_download_file = None
 
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(demo)
+        self._build_ui()
 
+    def _build_ui(self):
+        # 主容器
+        main_container = tk.Frame(self, bg="#f8f9fa", padx=20, pady=15)
+        main_container.pack(fill="both", expand=True)
+
+        # 1. 标题标签（加大字体）
+        tk.Label(main_container, text="元器件编号：", bg="#f8f9fa", font=("Microsoft YaHei", 12, "bold")).pack(anchor="w")
+
+        # 2. 输入区域
+        top_row = tk.Frame(main_container, bg="#f8f9fa")
+        top_row.pack(fill="x", pady=(10, 20))
+
+        # 输入框：设置 width 限制长度，字体加大
+        self.entry = ttk.Entry(top_row, font=("Arial", 14), width=15)
+        self.entry.insert(0, "C8734")
+        self.entry.pack(side="left", padx=(0, 15))
+
+        # 下载按钮：绿色，加大字体
+        self.btn_download = tk.Button(
+            top_row,
+            text="立即下载",
+            bg="#28a745",
+            fg="white",
+            font=("Microsoft YaHei", 11, "bold"),
+            relief="flat",
+            width=12,
+            height=1,
+            cursor="hand2",
+            command=self.start_download
+        )
+        self.btn_download.pack(side="left")
+
+        # 3. 日志区域（保持原有 Consolas 字体）
+        self.log = scrolledtext.ScrolledText(
+            main_container,
+            height=10,
+            font=("Consolas", 10),
+            bg="white",
+            relief="solid",
+            borderwidth=1
+        )
+        self.log.pack(fill="both", expand=True)
+
+        # 4. 底部路径栏（加大字体）
+        bottom_frame = tk.Frame(main_container, bg="#f8f9fa", pady=15)
+        bottom_frame.pack(fill="x")
+
+        self.path_label = tk.Label(
+            bottom_frame,
+            text=f"保存至: {self.download_path}",
+            bg="#f8f9fa",
+            fg="#495057",
+            font=("Microsoft YaHei", 10),
+            anchor="w"
+        )
+        self.path_label.pack(side="left", fill="x", expand=True)
+
+        # 定位按钮也略微调大
+        btn_style = ttk.Style()
+        btn_style.configure("Large.TButton", font=("Microsoft YaHei", 10))
+        ttk.Button(bottom_frame, text="定位文件", style="Large.TButton", width=10, command=self.locate_file).pack(side="right")
+
+        # 菜单
+        menu = tk.Menu(self)
+        self.config(menu=menu)
+        file_menu = tk.Menu(menu, tearoff=0)
+        menu.add_cascade(label="文件", menu=file_menu)
+        file_menu.add_command(label="修改下载路径", command=self.choose_path)
+        file_menu.add_separator()
+        file_menu.add_command(label="退出", command=self.quit)
+        help_menu = tk.Menu(menu, tearoff=0)
+        menu.add_cascade(label="帮助", menu=help_menu)
+        help_menu.add_command(label="关于", command=self.show_about)
+
+    def log_msg(self, msg):
         now = datetime.now().strftime("%H:%M:%S")
-        log_area.insert(tk.END, f"[{now}] {code}_3D模型下载成功！\n")
-        log_area.see(tk.END)  # 将滚动条滚动到底部
+        self.log.insert(tk.END, f"[{now}] {msg}\n")
+        self.log.see(tk.END)
 
-    except Exception as e:
-        now = datetime.now().strftime("%H:%M:%S")
-        log_area.insert(tk.END, f"[{now}] 错误：请检查编号是否正确。\n")
-        log_area.see(tk.END)  # 将滚动条滚动到底部
+    def choose_path(self):
+        p = filedialog.askdirectory()
+        if p:
+            self.download_path = p
+            save_download_path(p)
+            self.path_label.config(text=f"保存至: {p}")
 
+    def locate_file(self):
+        if not self.last_download_file or not os.path.exists(self.last_download_file):
+            messagebox.showinfo("提示", "还没有可定位的下载文件")
+            return
+        path = self.last_download_file
+        if sys.platform.startswith("win"):
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+        elif sys.platform.startswith("darwin"):
+            subprocess.call(["open", "-R", path])
+        else:
+            subprocess.call(["xdg-open", os.path.dirname(path)])
 
-def set_path():
-    selected_path = filedialog.askdirectory()
-    if selected_path:
-        path_label.config(text=selected_path)
-        save_path_config(selected_path)  # 保存路径信息到配置文件
+    # 关于内容完全保留
+    def show_about(self):
+        about = tk.Toplevel(self)
+        about.title("关于")
+        about.geometry("360x220")
+        about.resizable(False, False)
+        text = tk.Text(about, wrap="word", padx=10, pady=10)
+        text.pack(fill="both", expand=True)
+        content = (
+            "嘉立创 3D 模型下载器\n"
+            "版本：1.2\n"
+            "作者：Jupiter\n\n"
+            "项目地址：\n"
+            "https://github.com/zhutongxueya/JLC3DDownload\n\n"
+            "感谢 kulya97 的原始思路"
+        )
+        text.insert("1.0", content)
+        text.config(state="disabled")
+        text.tag_add("link", "5.0", "5.end")
+        text.tag_config("link", foreground="blue", underline=True)
+        text.tag_bind("link", "<Button-1>", lambda e: webbrowser.open("https://github.com/zhutongxueya/JLC3DDownload"))
 
-def about():
-    about_window = tk.Toplevel(root)
-    about_window.title("关于")
-    about_window.geometry("300x200")
+    def start_download(self):
+        # 下载中变色逻辑
+        self.btn_download.config(state="disabled", bg="#6c757d", text="下载中...")
+        threading.Thread(target=self.download_task, daemon=True).start()
 
-    text = tk.Text(about_window, wrap="word", padx=10, pady=10)
-    text.pack(expand=True, fill="both")
-    text.tag_configure("link", foreground="blue", underline=True)
+    def download_task(self):
+        code = self.entry.get().strip()
+        if not code:
+            self.after(0, lambda: messagebox.showwarning("提示", "请输入元器件编号"))
+            self.after(0, lambda: self.btn_download.config(state="normal", bg="#28a745", text="立即下载"))
+            return
 
-    about_text = "嘉立创3D模型下载器\n版本：1.1\n作者：Jupiter\n\n\n\n"
-    about_text += "更多信息请访问：https://github.com/zhutongxueya/JLC3DDownload"
+        try:
+            self.after(0, lambda: self.log_msg(f"搜索器件【{code}】…"))
+            device = search_product(code)
+            self.after(0, lambda: self.log_msg("解析模型 ID…"))
+            model_uuid = get_model_uuid(device)
+            self.after(0, lambda: self.log_msg("下载 STEP 文件…"))
+            model_file = get_model_file(model_uuid)
+            data = download_step_file(model_file)
 
-    about_text +="\n\n\n\n代码来自于kulya97，感谢大佬 "
+            filepath = os.path.join(self.download_path, f"{code}.step")
+            with open(filepath, "wb") as f:
+                f.write(data)
 
-    text.insert("1.0", about_text)
-    text.config(state="disabled")
+            self.last_download_file = filepath
+            self.after(0, lambda: self.log_msg(f"下载完成 ✔\n保存至：{filepath}"))
 
-    def on_link_click(event):
-        about_window.destroy()  # 关闭当前窗口
-        webbrowser.open("https://github.com/zhutongxueya/JLC3DDownload")  # 打开链接
+        except Exception as e:
+            self.after(0, lambda: self.log_msg(f"错误：{e}"))
+        finally:
+            self.after(0, lambda: self.btn_download.config(state="normal", bg="#28a745", text="立即下载"))
 
-    text.tag_bind("link", "<Button-1>", on_link_click)
-
-
-
-# 创建主窗口
-root = tk.Tk()
-root.title("立创3D模型下载器")
-
-# 设置窗口大小
-window_width = 430
-window_height = 290
-screen_width = root.winfo_screenwidth()
-screen_height = root.winfo_screenheight()
-x = (screen_width - window_width) // 2
-y = (screen_height - window_height) // 2
-root.geometry(f"{window_width}x{window_height}+{x}+{y}")
-
-# 设置窗口背景颜色
-root.configure(bg="#f0f0f0")
-
-# 创建输入框和标签
-code_label = tk.Label(root, text="元器件编号:", bg="#f0f0f0", font=("Arial", 12))
-code_label.grid(row=0, column=0, padx=(10, 5), pady=(20, 10), sticky="w")
-code_entry = tk.Entry(root, font=("Arial", 12))
-code_entry.insert(tk.END, "C8734")
-code_entry.grid(row=0, column=1, padx=(0, 10), pady=(20, 10), sticky="ew")
-
-# 绑定事件处理函数，实现点击输入框自动粘贴文件路径
-def paste_filepath(event):
-    filepath = root.clipboard_get()
-    code_entry.delete(0, tk.END)  # 清空输入框
-    code_entry.insert(tk.END, filepath)  # 粘贴文件路径
-
-code_entry.bind("<Button-1>", paste_filepath)  # 绑定左键点击事件
-
-
-# 创建下载按钮
-download_button = tk.Button(root, text="下载3D模型", command=download_3d_model, bg="#4CAF50", fg="white", width=20, height=2)
-download_button.grid(row=1, column=0, columnspan=2, padx=10, pady=(10, 5), sticky="ew")
-
-# 创建日志记录区域
-log_area = scrolledtext.ScrolledText(root, width=40, height=10)
-log_area.grid(row=2, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
-
-# 创建路径标签
-default_path = load_path_config() or get_desktop_path()  # 使用保存的路径或默认路径
-path_label = tk.Label(root, text="下载路径: "+ default_path, bg="#f0f0f0")
-path_label.grid(row=3, column=0, padx=10, pady=(5, 10), sticky="w")
-
-# 创建菜单栏
-menubar = tk.Menu(root)
-root.config(menu=menubar)
-
-# 创建菜单
-file_menu = tk.Menu(menubar, tearoff=0)
-menubar.add_cascade(label="文件", menu=file_menu)
-file_menu.add_command(label="修改下载路径", command=set_path)
-file_menu.add_separator()
-file_menu.add_command(label="退出", command=root.quit)
-
-help_menu = tk.Menu(menubar, tearoff=0)
-menubar.add_cascade(label="帮助", menu=help_menu)
-help_menu.add_command(label="关于", command=about)
-
-# 运行主循环
-root.mainloop()
+if __name__ == "__main__":
+    JLC3DApp().mainloop()
